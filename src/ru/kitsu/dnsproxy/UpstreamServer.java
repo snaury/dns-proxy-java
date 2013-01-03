@@ -31,14 +31,12 @@ public class UpstreamServer {
 	private final Map<Short, UpstreamRequest> inflight = new HashMap<>();
 	private final Map<ProxyRequest, UpstreamRequest> accepted = new HashMap<>();
 	private final BlockingQueue<UpstreamRequest> requests = new LinkedBlockingQueue<>();
-	private final BlockingQueue<UpstreamResponse> responses = new LinkedBlockingQueue<>();
 
 	private final ProxyServer proxyServer;
 	private final InetSocketAddress addr;
 	private final DatagramChannel socket;
 	private final Thread receiveThread;
 	private final Thread sendThread;
-	private final Thread responsesThread;
 
 	private final short shuffleKey = (short) random.nextInt();
 	private short nextId = 0;
@@ -96,8 +94,7 @@ public class UpstreamServer {
 					buffer.get(packet);
 					final UpstreamResponse response = new UpstreamResponse(
 							remote, packet, message, request.getProxyRequest());
-					// onResponse(response);
-					responses.put(response);
+					onResponse(response);
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -145,20 +142,6 @@ public class UpstreamServer {
 		}
 	}
 
-	private class ResponsesWorker implements Runnable {
-		@Override
-		public void run() {
-			try {
-				while (!Thread.interrupted()) {
-					final UpstreamResponse response = responses.take();
-					onResponse(response);
-				}
-			} catch (InterruptedException e) {
-				// interrupted
-			}
-		}
-	}
-
 	public UpstreamServer(final ProxyServer proxyServer, final String host,
 			final int port) throws IOException {
 		this.proxyServer = proxyServer;
@@ -167,9 +150,9 @@ public class UpstreamServer {
 			throw new IOException("Cannot resolve '" + host + "'");
 		}
 		socket = DatagramChannel.open(StandardProtocolFamily.INET);
-		receiveThread = new Thread(new ReceiveWorker());
-		sendThread = new Thread(new SendWorker());
-		responsesThread = new Thread(new ResponsesWorker());
+		final String prefix = "Upstream " + addr;
+		receiveThread = new Thread(new ReceiveWorker(), prefix + " receive");
+		sendThread = new Thread(new SendWorker(), prefix + " send");
 	}
 
 	public InetSocketAddress getAddr() {
@@ -188,13 +171,11 @@ public class UpstreamServer {
 	public void start() {
 		receiveThread.start();
 		sendThread.start();
-		responsesThread.start();
 	}
 
 	public void stop() {
 		receiveThread.interrupt();
 		sendThread.interrupt();
-		responsesThread.interrupt();
 	}
 
 	/**
@@ -248,14 +229,14 @@ public class UpstreamServer {
 		} finally {
 			lock.unlock();
 		}
-		// NOTE: we don't remove request from pending because normally
+		// NOTE: we don't remove request from requests because normally
 		// by the time cancel is called request is already sent and
-		// send thread will ignore requests that are removed.
+		// send thread will ignore requests that are removed anyway.
 		return true;
 	}
 
 	protected void onResponse(UpstreamResponse response)
 			throws InterruptedException {
-		proxyServer.onResponse(response);
+		proxyServer.onUpstreamResponse(response);
 	}
 }

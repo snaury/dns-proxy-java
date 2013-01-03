@@ -41,13 +41,15 @@ public class ProxyServer {
 	private final Condition inflightAvailable = lock.newCondition();
 	private final PriorityQueue<ProxyRequest> inflight = new PriorityQueue<>(
 			11, new ProxyRequest.DeadlineComparator());
-	private final BlockingQueue<ProxyResponse> pending = new LinkedBlockingQueue<>();
+	private final BlockingQueue<ProxyResponse> responses = new LinkedBlockingQueue<>();
+	private final BlockingQueue<UpstreamResponse> uresponses = new LinkedBlockingQueue<>();
 	private final BlockingQueue<ProxyRequest> logged = new LinkedBlockingQueue<>();
 
 	private final InetSocketAddress addr;
 	private final DatagramChannel socket;
 	private final Thread receiveThread;
 	private final Thread sendThread;
+	private final Thread responsesThread;
 	private final Thread timeoutThread;
 	private final Thread logThread;
 	private final Thread statsThread;
@@ -106,7 +108,7 @@ public class ProxyServer {
 					.allocateDirect(MAX_PACKET_SIZE);
 			try {
 				while (!Thread.interrupted()) {
-					final ProxyResponse response = pending.take();
+					final ProxyResponse response = responses.take();
 					final byte[] packet = response.getResponsePacket();
 					if (packet.length < 12 || packet.length > MAX_PACKET_SIZE)
 						continue;
@@ -131,13 +133,25 @@ public class ProxyServer {
 		}
 	}
 
+	private class ResponsesWorker implements Runnable {
+		@Override
+		public void run() {
+			try {
+				while (!Thread.interrupted()) {
+					onResponse(uresponses.take());
+				}
+			} catch (InterruptedException e) {
+				// interrupted
+			}
+		}
+	}
+
 	private class TimeoutWorker implements Runnable {
 		@Override
 		public void run() {
 			try {
 				while (!Thread.interrupted()) {
-					final ProxyRequest request = takeNextTimedOut();
-					onTimeout(request);
+					onTimeout(takeNextTimedOut());
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -277,11 +291,14 @@ public class ProxyServer {
 		}
 		socket = DatagramChannel.open(StandardProtocolFamily.INET);
 		socket.bind(addr);
-		receiveThread = new Thread(new ReceiveWorker());
-		sendThread = new Thread(new SendWorker());
-		timeoutThread = new Thread(new TimeoutWorker());
-		logThread = new Thread(new LogWorker());
-		statsThread = new Thread(new StatsWorker());
+		final String prefix = "Proxy " + addr;
+		receiveThread = new Thread(new ReceiveWorker(), prefix + " receive");
+		sendThread = new Thread(new SendWorker(), prefix + " send");
+		responsesThread = new Thread(new ResponsesWorker(), prefix
+				+ " responses");
+		timeoutThread = new Thread(new TimeoutWorker(), prefix + " timeouts");
+		logThread = new Thread(new LogWorker(), prefix + " logging");
+		statsThread = new Thread(new StatsWorker(), prefix + " stats");
 	}
 
 	public void addUpstream(String host, int port) throws IOException {
@@ -301,6 +318,7 @@ public class ProxyServer {
 		}
 		receiveThread.start();
 		sendThread.start();
+		responsesThread.start();
 		timeoutThread.start();
 		logThread.start();
 		statsThread.start();
@@ -309,6 +327,7 @@ public class ProxyServer {
 	public void stop() {
 		receiveThread.interrupt();
 		sendThread.interrupt();
+		responsesThread.interrupt();
 		timeoutThread.interrupt();
 		logThread.interrupt();
 		statsThread.interrupt();
@@ -320,6 +339,7 @@ public class ProxyServer {
 	public void join() throws InterruptedException {
 		receiveThread.join();
 		sendThread.join();
+		responsesThread.join();
 		timeoutThread.join();
 		logThread.join();
 		statsThread.join();
@@ -393,7 +413,7 @@ public class ProxyServer {
 		}
 	}
 
-	public void onResponse(UpstreamResponse response)
+	protected void onResponse(UpstreamResponse response)
 			throws InterruptedException {
 		if (DEBUG) {
 			System.out.format("Response from %s: %s\n", response.getAddr(),
@@ -403,7 +423,7 @@ public class ProxyServer {
 		int index = request.addResponse(response);
 		if (index == 0) {
 			// First response is sent to the client
-			pending.put(new ProxyResponse(request, response));
+			responses.put(new ProxyResponse(request, response));
 		}
 		if (index == upstreams.size() - 1) {
 			// Received last response, finish request
@@ -416,7 +436,7 @@ public class ProxyServer {
 		}
 	}
 
-	public void onTimeout(ProxyRequest request) throws InterruptedException {
+	protected void onTimeout(ProxyRequest request) throws InterruptedException {
 		// Request was removed due to timeout
 		if (request.setFinished()) {
 			// Make sure it's cancelled
@@ -426,6 +446,11 @@ public class ProxyServer {
 			// Send to logging
 			logged.put(request);
 		}
+	}
+
+	public void onUpstreamResponse(UpstreamResponse response)
+			throws InterruptedException {
+		uresponses.put(response);
 	}
 
 	private static void usage() {
