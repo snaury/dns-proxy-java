@@ -1,0 +1,11 @@
+<?xml version="1.0" ?>
+<!-- Configuration of the Ant build system to generate a Jar file --> 
+<project name="DNSProxy" default="CreateJar">
+  <target name="CreateJar" description="Create Jar file">
+    <jar jarfile="DNSProxy.jar" basedir="bin" includes="**/*.class">
+      <manifest>
+        <attribute name="Main-Class" value="ru.kitsu.dnsproxy.ProxyServer" />
+      </manifest>
+    </jar>
+  </target>
+</project>
