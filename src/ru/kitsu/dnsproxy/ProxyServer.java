@@ -29,7 +29,10 @@ import ru.kitsu.dnsproxy.parser.DNSParseException;
 import ru.kitsu.dnsproxy.parser.DNSMessage;
 
 public class ProxyServer {
+	// For debugging, print requests and responses
 	private static final boolean DEBUG = false;
+	// Remove requests from timeout queue, even though it's expensive
+	private static final boolean PEDANTIC = false;
 	// Maximum message should be 512 bytes
 	// We accept up to 16384 bytes just in case
 	private static final int MAX_PACKET_SIZE = 16384;
@@ -177,6 +180,8 @@ public class ProxyServer {
 				long lastzone = -1;
 				PrintStream output = null;
 				StringBuilder sb = new StringBuilder();
+				final UpstreamResponse[] responsesArray = new UpstreamResponse[upstreams
+						.size()];
 				while (!Thread.interrupted()) {
 					final ProxyRequest request = logged.take();
 					// Current nanotime for latency of timed out requests
@@ -219,7 +224,8 @@ public class ProxyServer {
 						lastzone = zone;
 					}
 					// All upstream responses
-					final UpstreamResponse[] responses = request.getResponses();
+					final UpstreamResponse[] responses = request
+							.getResponses(responsesArray);
 					// Start constructing a log line
 					sb.setLength(0);
 					sb.append(timestamp);
@@ -227,6 +233,8 @@ public class ProxyServer {
 						sb.append("\t");
 						UpstreamResponse response = null;
 						for (UpstreamResponse candidate : responses) {
+							if (candidate == null)
+								break;
 							if (upstream.getAddr().equals(candidate.getAddr())) {
 								response = candidate;
 								break;
@@ -368,6 +376,8 @@ public class ProxyServer {
 
 	private boolean removeRequest(ProxyRequest request)
 			throws InterruptedException {
+		if (!PEDANTIC)
+			return false;
 		lock.lockInterruptibly();
 		try {
 			return inflight.remove(request);

@@ -76,6 +76,10 @@ public final class ProxyRequest {
 		return responses.toArray(r);
 	}
 
+	public synchronized UpstreamResponse[] getResponses(UpstreamResponse[] r) {
+		return responses.toArray(r);
+	}
+
 	public synchronized int addResponse(UpstreamResponse response) {
 		int index = responses.size();
 		responses.add(response);
