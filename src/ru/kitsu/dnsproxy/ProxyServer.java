@@ -393,12 +393,13 @@ public class ProxyServer {
 		}
 	}
 
-	public void onResponse(ProxyRequest request, UpstreamResponse response)
+	public void onResponse(UpstreamResponse response)
 			throws InterruptedException {
 		if (DEBUG) {
 			System.out.format("Response from %s: %s\n", response.getAddr(),
 					response.getMessage());
 		}
+		ProxyRequest request = response.getProxyRequest();
 		int index = request.addResponse(response);
 		if (index == 0) {
 			// First response is sent to the client

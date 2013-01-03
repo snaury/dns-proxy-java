@@ -30,13 +30,15 @@ public class UpstreamServer {
 	private final Lock lock = new ReentrantLock();
 	private final Map<Short, UpstreamRequest> inflight = new HashMap<>();
 	private final Map<ProxyRequest, UpstreamRequest> accepted = new HashMap<>();
-	private final BlockingQueue<UpstreamRequest> pending = new LinkedBlockingQueue<>();
+	private final BlockingQueue<UpstreamRequest> requests = new LinkedBlockingQueue<>();
+	private final BlockingQueue<UpstreamResponse> responses = new LinkedBlockingQueue<>();
 
 	private final ProxyServer proxyServer;
 	private final InetSocketAddress addr;
 	private final DatagramChannel socket;
 	private final Thread receiveThread;
 	private final Thread sendThread;
+	private final Thread responsesThread;
 
 	private final short shuffleKey = (short) random.nextInt();
 	private short nextId = 0;
@@ -93,8 +95,9 @@ public class UpstreamServer {
 					final byte[] packet = new byte[buffer.limit()];
 					buffer.get(packet);
 					final UpstreamResponse response = new UpstreamResponse(
-							remote, packet, message);
-					onResponse(request, response);
+							remote, packet, message, request.getProxyRequest());
+					// onResponse(response);
+					responses.put(response);
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -109,7 +112,7 @@ public class UpstreamServer {
 			try {
 				// Loop until interrupted
 				while (!Thread.interrupted()) {
-					final UpstreamRequest request = pending.take();
+					final UpstreamRequest request = requests.take();
 					// FIXME: is this check really worth it?
 					lock.lockInterruptibly();
 					try {
@@ -142,6 +145,20 @@ public class UpstreamServer {
 		}
 	}
 
+	private class ResponsesWorker implements Runnable {
+		@Override
+		public void run() {
+			try {
+				while (!Thread.interrupted()) {
+					final UpstreamResponse response = responses.take();
+					onResponse(response);
+				}
+			} catch (InterruptedException e) {
+				// interrupted
+			}
+		}
+	}
+
 	public UpstreamServer(final ProxyServer proxyServer, final String host,
 			final int port) throws IOException {
 		this.proxyServer = proxyServer;
@@ -152,6 +169,7 @@ public class UpstreamServer {
 		socket = DatagramChannel.open(StandardProtocolFamily.INET);
 		receiveThread = new Thread(new ReceiveWorker());
 		sendThread = new Thread(new SendWorker());
+		responsesThread = new Thread(new ResponsesWorker());
 	}
 
 	public InetSocketAddress getAddr() {
@@ -170,11 +188,13 @@ public class UpstreamServer {
 	public void start() {
 		receiveThread.start();
 		sendThread.start();
+		responsesThread.start();
 	}
 
 	public void stop() {
 		receiveThread.interrupt();
 		sendThread.interrupt();
+		responsesThread.interrupt();
 	}
 
 	/**
@@ -213,7 +233,7 @@ public class UpstreamServer {
 		} finally {
 			lock.unlock();
 		}
-		pending.put(upstreamRequest);
+		requests.put(upstreamRequest);
 		return true;
 	}
 
@@ -234,8 +254,8 @@ public class UpstreamServer {
 		return true;
 	}
 
-	protected void onResponse(UpstreamRequest request, UpstreamResponse response)
+	protected void onResponse(UpstreamResponse response)
 			throws InterruptedException {
-		proxyServer.onResponse(request.getProxyRequest(), response);
+		proxyServer.onResponse(response);
 	}
 }

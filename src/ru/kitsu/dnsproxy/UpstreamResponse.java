@@ -14,13 +14,15 @@ public class UpstreamResponse {
 	private final SocketAddress addr;
 	private final byte[] packet;
 	private final DNSMessage message;
+	private final ProxyRequest proxyRequest;
 	private final long timestamp;
 
 	public UpstreamResponse(SocketAddress addr, byte[] packet,
-			DNSMessage message) {
+			DNSMessage message, ProxyRequest proxyRequest) {
 		this.addr = addr;
 		this.packet = packet;
 		this.message = message;
+		this.proxyRequest = proxyRequest;
 		this.timestamp = System.nanoTime();
 	}
 
@@ -34,6 +36,10 @@ public class UpstreamResponse {
 
 	public DNSMessage getMessage() {
 		return message;
+	}
+
+	public ProxyRequest getProxyRequest() {
+		return proxyRequest;
 	}
 
 	public long getTimestamp() {
