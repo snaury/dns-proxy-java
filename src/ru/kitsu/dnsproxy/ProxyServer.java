@@ -42,7 +42,7 @@ public class ProxyServer {
 	private final PriorityQueue<ProxyRequest> inflight = new PriorityQueue<>(
 			11, new ProxyRequest.DeadlineComparator());
 	private final BlockingQueue<ProxyResponse> responses = new LinkedBlockingQueue<>();
-	private final BlockingQueue<UpstreamResponse> uresponses = new LinkedBlockingQueue<>();
+	private final BlockingQueue<RequestResponse> uresponses = new LinkedBlockingQueue<>();
 	private final BlockingQueue<ProxyRequest> logged = new LinkedBlockingQueue<>();
 
 	private final InetSocketAddress addr;
@@ -54,6 +54,16 @@ public class ProxyServer {
 	private final Thread logThread;
 	private final Thread statsThread;
 	private final List<UpstreamServer> upstreams = new ArrayList<>();
+
+	private static class RequestResponse {
+		ProxyRequest request;
+		UpstreamResponse response;
+
+		RequestResponse(ProxyRequest request, UpstreamResponse response) {
+			this.request = request;
+			this.response = response;
+		}
+	}
 
 	private class ReceiveWorker implements Runnable {
 		@Override
@@ -138,7 +148,8 @@ public class ProxyServer {
 		public void run() {
 			try {
 				while (!Thread.interrupted()) {
-					onResponse(uresponses.take());
+					RequestResponse uresponse = uresponses.take();
+					onResponse(uresponse.request, uresponse.response);
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -413,13 +424,12 @@ public class ProxyServer {
 		}
 	}
 
-	protected void onResponse(UpstreamResponse response)
+	protected void onResponse(ProxyRequest request, UpstreamResponse response)
 			throws InterruptedException {
 		if (DEBUG) {
 			System.out.format("Response from %s: %s\n", response.getAddr(),
 					response.getMessage());
 		}
-		ProxyRequest request = response.getProxyRequest();
 		int index = request.addResponse(response);
 		if (index == 0) {
 			// First response is sent to the client
@@ -448,9 +458,9 @@ public class ProxyServer {
 		}
 	}
 
-	public void onUpstreamResponse(UpstreamResponse response)
-			throws InterruptedException {
-		uresponses.put(response);
+	public void onUpstreamResponse(ProxyRequest request,
+			UpstreamResponse response) throws InterruptedException {
+		uresponses.put(new RequestResponse(request, response));
 	}
 
 	private static void usage() {

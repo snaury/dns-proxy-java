@@ -93,8 +93,8 @@ public class UpstreamServer {
 					final byte[] packet = new byte[buffer.limit()];
 					buffer.get(packet);
 					final UpstreamResponse response = new UpstreamResponse(
-							remote, packet, message, request.getProxyRequest());
-					onResponse(response);
+							remote, packet, message);
+					onResponse(request, response);
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -235,8 +235,8 @@ public class UpstreamServer {
 		return true;
 	}
 
-	protected void onResponse(UpstreamResponse response)
+	protected void onResponse(UpstreamRequest request, UpstreamResponse response)
 			throws InterruptedException {
-		proxyServer.onUpstreamResponse(response);
+		proxyServer.onUpstreamResponse(request.getProxyRequest(), response);
 	}
 }
