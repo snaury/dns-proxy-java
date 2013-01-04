@@ -2,6 +2,12 @@ package ru.kitsu.dnsproxy.parser;
 
 import java.util.Arrays;
 
+/**
+ * A single RR in a DNS message
+ * 
+ * @author Alexey Borzenkov
+ * 
+ */
 public final class DNSResourceRecord {
 	private final static String HEX = "0123456789abcdef";
 

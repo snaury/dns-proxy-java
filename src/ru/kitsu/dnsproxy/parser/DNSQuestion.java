@@ -1,5 +1,11 @@
 package ru.kitsu.dnsproxy.parser;
 
+/**
+ * A single question in a DNS message
+ * 
+ * @author Alexey Borzenkov
+ * 
+ */
 public final class DNSQuestion {
 	private final String name;
 	private final short qtype;

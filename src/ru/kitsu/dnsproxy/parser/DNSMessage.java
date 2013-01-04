@@ -5,6 +5,12 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.CharBuffer;
 
+/**
+ * Parsed DNS message
+ * 
+ * @author Alexey Borzenkov
+ *
+ */
 public final class DNSMessage {
 	private static final short RESPONSE_MASK = (short) 0x8000;
 	private static final short OPCODE_MASK = (short) 0x7800;

@@ -1,5 +1,11 @@
 package ru.kitsu.dnsproxy;
 
+/**
+ * Parsed upstream configuration line
+ * 
+ * @author Alexey Borzenkov
+ * 
+ */
 public class UpstreamConfig {
 	private final String host;
 	private final int port;

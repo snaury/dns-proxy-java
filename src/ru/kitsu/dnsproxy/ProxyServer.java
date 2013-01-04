@@ -29,6 +29,12 @@ import java.util.concurrent.locks.ReentrantLock;
 import ru.kitsu.dnsproxy.parser.DNSParseException;
 import ru.kitsu.dnsproxy.parser.DNSMessage;
 
+/**
+ * Proxy server that forwards requests to upstreams
+ * 
+ * @author Alexey Borzenkov
+ * 
+ */
 public class ProxyServer {
 	// For debugging, print requests and responses
 	private static final boolean DEBUG = false;

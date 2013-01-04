@@ -19,6 +19,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import ru.kitsu.dnsproxy.parser.DNSMessage;
 import ru.kitsu.dnsproxy.parser.DNSParseException;
 
+/**
+ * Manages packets to and from a single upstream server
+ * 
+ * @author Alexey Borzenkov
+ * 
+ */
 public class UpstreamServer {
 	// Maximum message should be 512 bytes
 	// We accept up to 16384 bytes just in case
