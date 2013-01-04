@@ -27,6 +27,7 @@ public class UpstreamServer {
 	private static final Random random = new Random();
 
 	private final AtomicInteger inflightCount = new AtomicInteger();
+	private final AtomicInteger parseErrors = new AtomicInteger();
 	private final Map<Short, UpstreamRequest> inflight = new HashMap<>();
 	private final Map<ProxyRequest, UpstreamRequest> accepted = new HashMap<>();
 	private final BlockingQueue<Object> incoming = new LinkedBlockingQueue<>();
@@ -156,14 +157,18 @@ public class UpstreamServer {
 						continue; // ignore packets from unexpected sources
 					final DNSMessage message;
 					try {
-						message = DNSMessage.parse(buffer);
+						message = DNSMessage.parse(buffer, false);
 					} catch (BufferUnderflowException e) {
+						parseErrors.incrementAndGet();
 						continue; // message is severely truncated
 					} catch (DNSParseException e) {
+						parseErrors.incrementAndGet();
 						continue; // cannot parse or whatever
 					}
-					if (!message.isResponse())
+					if (!message.isResponse()) {
+						parseErrors.incrementAndGet();
 						continue; // ignore non-responses
+					}
 					buffer.rewind();
 					final byte[] packet = new byte[buffer.limit()];
 					buffer.get(packet);
@@ -230,6 +235,10 @@ public class UpstreamServer {
 
 	public int getInflightCount() {
 		return inflightCount.get();
+	}
+
+	public int getParseErrors() {
+		return parseErrors.get();
 	}
 
 	public void start() {

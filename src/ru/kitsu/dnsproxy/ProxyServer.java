@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -162,7 +163,7 @@ public class ProxyServer {
 					buffer.flip();
 					final DNSMessage message;
 					try {
-						message = DNSMessage.parse(buffer);
+						message = DNSMessage.parse(buffer, false);
 					} catch (BufferUnderflowException e) {
 						continue;
 					} catch (DNSParseException e) {
@@ -328,7 +329,6 @@ public class ProxyServer {
 					long t0 = System.nanoTime();
 					long freeMemory = Runtime.getRuntime().freeMemory();
 					long totalMemory = Runtime.getRuntime().totalMemory();
-					long t1 = System.nanoTime();
 					sb.setLength(0);
 					sb.append("Used memory: ");
 					sb.append((totalMemory - freeMemory) / 1048576);
@@ -336,6 +336,7 @@ public class ProxyServer {
 					sb.append(totalMemory / 1048576);
 					sb.append("MB, ");
 					sb.append("Upstreams inflight: ");
+					int n;
 					int index = 0;
 					for (UpstreamServer upstream : upstreams) {
 						if (index != 0) {
@@ -347,8 +348,14 @@ public class ProxyServer {
 						sb.append(upstream.getAddr().getPort());
 						sb.append(": ");
 						sb.append(upstream.getInflightCount());
+						if ((n = upstream.getParseErrors()) != 0) {
+							sb.append("/");
+							sb.append(n);
+							sb.append("err");
+						}
 						++index;
 					}
+					long t1 = System.nanoTime();
 					sb.append(", Check: ");
 					sb.append(t1 - t0);
 					sb.append("ns");
@@ -420,7 +427,9 @@ public class ProxyServer {
 		lock.lockInterruptibly();
 		try {
 			inflight.offer(request);
-			inflightAvailable.signal();
+			// Only signal if request becomes first in the queue
+			if (inflight.peek() == request)
+				inflightAvailable.signal(); // deadline changed
 		} finally {
 			lock.unlock();
 		}
@@ -452,7 +461,10 @@ public class ProxyServer {
 				if (delay <= 0) {
 					return inflight.poll();
 				}
-				inflightAvailable.awaitNanos(delay);
+				// reduce sensitivity to ~10ms
+				inflightAvailable.await(((delay + 9999999) / 10000000) * 10,
+						TimeUnit.MILLISECONDS);
+				// inflightAvailable.awaitNanos(delay);
 			}
 		} finally {
 			lock.unlock();
