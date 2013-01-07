@@ -94,8 +94,8 @@ public class ProxyServer {
 									request.getAddr(), request.getMessage());
 						}
 						addRequest(request);
-						for (UpstreamServer upstream : upstreams) {
-							upstream.startRequest(request);
+						for (int i = 0; i < upstreams.size(); ++i) {
+							upstreams.get(i).startRequest(request);
 						}
 						continue;
 					}
@@ -129,8 +129,8 @@ public class ProxyServer {
 						final ProxyRequest request = ((TimeoutRequest) op).request;
 						if (request.setFinished()) {
 							// Make sure it's cancelled
-							for (UpstreamServer upstream : upstreams) {
-								upstream.cancelRequest(request);
+							for (int i = 0; i < upstreams.size(); ++i) {
+								upstreams.get(i).cancelRequest(request);
 							}
 							// Send to logging
 							logged.put(request);
@@ -292,12 +292,12 @@ public class ProxyServer {
 					// Start constructing a log line
 					sb.setLength(0);
 					sb.append(timestamp);
-					for (UpstreamServer upstream : upstreams) {
+					for (int i = 0; i < upstreams.size(); ++i) {
+						final UpstreamServer upstream = upstreams.get(i);
 						sb.append("\t");
 						UpstreamResponse response = null;
-						for (UpstreamResponse candidate : responses) {
-							if (candidate == null)
-								break;
+						for (int j = 0; j < responses.size(); ++j) {
+							final UpstreamResponse candidate = responses.get(j);
 							if (upstream.getAddr().equals(candidate.getAddr())) {
 								response = candidate;
 								break;
