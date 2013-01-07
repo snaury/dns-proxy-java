@@ -107,6 +107,8 @@ public class ProxyServer {
 							System.out.format("Response from %s: %s\n",
 									response.getAddr(), response.getMessage());
 						}
+						if (request.isFinished())
+							continue; // ignore late responses
 						int index = request.addResponse(response);
 						if (index == 0) {
 							// First response is sent to the client
@@ -243,8 +245,6 @@ public class ProxyServer {
 				long lastzone = -1;
 				PrintStream output = null;
 				StringBuilder sb = new StringBuilder();
-				final UpstreamResponse[] responsesArray = new UpstreamResponse[upstreams
-						.size()];
 				while (!Thread.interrupted()) {
 					final ProxyRequest request = logged.take();
 					// Current nanotime for latency of timed out requests
@@ -287,8 +287,8 @@ public class ProxyServer {
 						lastzone = zone;
 					}
 					// All upstream responses
-					final UpstreamResponse[] responses = request
-							.getResponses(responsesArray);
+					final List<UpstreamResponse> responses = request
+							.getResponses();
 					// Start constructing a log line
 					sb.setLength(0);
 					sb.append(timestamp);

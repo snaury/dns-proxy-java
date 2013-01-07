@@ -1,11 +1,10 @@
 package ru.kitsu.dnsproxy;
 
 import java.net.SocketAddress;
+import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import ru.kitsu.dnsproxy.parser.DNSMessage;
 
@@ -16,6 +15,7 @@ import ru.kitsu.dnsproxy.parser.DNSMessage;
  * 
  */
 public final class ProxyRequest {
+	private static final int MAX_UPSTREAMS = 10;
 	private static final long defaultTimeout = TimeUnit.SECONDS.toNanos(5);
 
 	private final SocketAddress addr;
@@ -23,8 +23,8 @@ public final class ProxyRequest {
 	private final DNSMessage message;
 	private final long timestamp;
 	private final long deadline;
-	private final AtomicBoolean finished = new AtomicBoolean();
-	private final List<UpstreamResponse> responses = new LinkedList<>();
+	private final List<UpstreamResponse> responses = new ArrayList<>(MAX_UPSTREAMS);
+	private boolean finished = false;
 
 	public static final class DeadlineComparator implements
 			Comparator<ProxyRequest> {
@@ -71,26 +71,23 @@ public final class ProxyRequest {
 		return deadline;
 	}
 
-	public synchronized UpstreamResponse[] getResponses() {
-		UpstreamResponse[] r = new UpstreamResponse[responses.size()];
-		return responses.toArray(r);
+	public List<UpstreamResponse> getResponses() {
+		return responses;
 	}
 
-	public synchronized UpstreamResponse[] getResponses(UpstreamResponse[] r) {
-		return responses.toArray(r);
-	}
-
-	public synchronized int addResponse(UpstreamResponse response) {
+	public int addResponse(UpstreamResponse response) {
 		int index = responses.size();
 		responses.add(response);
 		return index;
 	}
 
 	public boolean isFinished() {
-		return finished.get();
+		return finished;
 	}
 
 	public boolean setFinished() {
-		return !finished.getAndSet(true);
+		boolean prev = !finished;
+		finished = true;
+		return prev;
 	}
 }
