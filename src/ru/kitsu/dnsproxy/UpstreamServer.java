@@ -36,107 +36,16 @@ public class UpstreamServer {
 	private final AtomicInteger parseErrors = new AtomicInteger();
 	private final Map<Short, UpstreamRequest> inflight = new HashMap<>();
 	private final Map<ProxyRequest, UpstreamRequest> accepted = new HashMap<>();
-	private final BlockingQueue<Object> incoming = new LinkedBlockingQueue<>();
 	private final BlockingQueue<UpstreamRequest> outgoing = new LinkedBlockingQueue<>();
 
 	private final ProxyServer proxyServer;
 	private final InetSocketAddress addr;
 	private final DatagramChannel socket;
-	private final Thread processingThread;
 	private final Thread receiveThread;
 	private final Thread sendThread;
 
 	private final short shuffleKey = (short) random.nextInt();
 	private short nextId = 0;
-
-	private static class CancelRequest {
-		ProxyRequest proxyRequest;
-
-		CancelRequest(ProxyRequest proxyRequest) {
-			this.proxyRequest = proxyRequest;
-		}
-	}
-
-	private class ProcessingWorker implements Runnable {
-		@Override
-		public void run() {
-			try {
-				while (!Thread.interrupted()) {
-					final Object op = incoming.take();
-					if (op instanceof ProxyRequest) {
-						// start a new ProxyRequest
-						final ProxyRequest proxyRequest = (ProxyRequest) op;
-						if (null != accepted.get(proxyRequest))
-							continue;
-						short id = generateRequestId();
-						if (id == 0)
-							continue; // no free slots left
-						final UpstreamRequest upstreamRequest = new UpstreamRequest(
-								id, proxyRequest);
-						inflight.put(id, upstreamRequest);
-						accepted.put(proxyRequest, upstreamRequest);
-						inflightCount.set(inflight.size());
-						outgoing.put(upstreamRequest);
-						continue;
-					}
-					if (op instanceof CancelRequest) {
-						// cancel existing ProxyRequest
-						final ProxyRequest proxyRequest = ((CancelRequest) op).proxyRequest;
-						final UpstreamRequest upstreamRequest = accepted
-								.get(proxyRequest);
-						if (null == upstreamRequest)
-							continue;
-						final Short id = upstreamRequest.getId();
-						inflight.remove(id);
-						accepted.remove(proxyRequest);
-						inflightCount.set(inflight.size());
-						continue;
-					}
-					if (op instanceof UpstreamResponse) {
-						// match upstream response to proxy request
-						final UpstreamResponse response = (UpstreamResponse) op;
-						final Short id = response.getMessage().getId();
-						final UpstreamRequest upstreamRequest = inflight
-								.get(id);
-						if (null == upstreamRequest)
-							continue; // no such request in flight
-						final ProxyRequest proxyRequest = upstreamRequest
-								.getProxyRequest();
-						if (!Arrays.equals(
-								response.getMessage().getQuestions(),
-								proxyRequest.getMessage().getQuestions()))
-							continue; // ids match, but questions don't
-						inflight.remove(id);
-						accepted.remove(proxyRequest);
-						inflightCount.set(inflight.size());
-						proxyServer.onUpstreamResponse(proxyRequest, response);
-						continue;
-					}
-					System.err.println("Unexpected message: " + op);
-					System.exit(1);
-				}
-			} catch (InterruptedException e) {
-				// interrupted
-			}
-		}
-
-		/**
-		 * Generates a new request id, or 0 if no free slots are available
-		 * 
-		 * @return next free request id
-		 */
-		private short generateRequestId() {
-			short id = nextId;
-			do {
-				short requestId = (short) (shuffleKey ^ id++);
-				if (requestId != 0 && inflight.get(requestId) == null) {
-					nextId = id;
-					return requestId;
-				}
-			} while (id != nextId);
-			return 0;
-		}
-	}
 
 	private class ReceiveWorker implements Runnable {
 		@Override
@@ -180,7 +89,27 @@ public class UpstreamServer {
 					buffer.get(packet);
 					final UpstreamResponse response = new UpstreamResponse(
 							remote, packet, message);
-					incoming.put(response);
+					proxyServer.schedule(new Runnable() {
+						@Override
+						public void run() {
+							final Short id = response.getMessage().getId();
+							final UpstreamRequest upstreamRequest = inflight
+									.get(id);
+							if (null == upstreamRequest)
+								return; // no such request in flight
+							final ProxyRequest proxyRequest = upstreamRequest
+									.getProxyRequest();
+							if (!Arrays.equals(response.getMessage()
+									.getQuestions(), proxyRequest.getMessage()
+									.getQuestions()))
+								return; // ids match, but questions don't
+							inflight.remove(id);
+							accepted.remove(proxyRequest);
+							inflightCount.set(inflight.size());
+							proxyServer.onUpstreamResponse(proxyRequest,
+									response);
+						}
+					});
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -229,8 +158,6 @@ public class UpstreamServer {
 		}
 		socket = DatagramChannel.open(StandardProtocolFamily.INET);
 		final String prefix = "Upstream " + addr;
-		processingThread = new Thread(new ProcessingWorker(), prefix
-				+ " processing");
 		receiveThread = new Thread(new ReceiveWorker(), prefix + " receive");
 		sendThread = new Thread(new SendWorker(), prefix + " send");
 	}
@@ -248,28 +175,59 @@ public class UpstreamServer {
 	}
 
 	public void start() {
-		processingThread.start();
 		receiveThread.start();
 		sendThread.start();
 	}
 
 	public void stop() {
-		processingThread.interrupt();
 		receiveThread.interrupt();
 		sendThread.interrupt();
 	}
 
-	public void startRequest(ProxyRequest proxyRequest)
-			throws InterruptedException {
-		if (null == proxyRequest)
-			throw new NullPointerException();
-		incoming.put(proxyRequest);
+	/**
+	 * Generates a new request id, or 0 if no free slots are available
+	 * 
+	 * @return next free request id
+	 */
+	private short generateRequestId() {
+		short id = nextId;
+		do {
+			short requestId = (short) (shuffleKey ^ id++);
+			if (requestId != 0 && inflight.get(requestId) == null) {
+				nextId = id;
+				return requestId;
+			}
+		} while (id != nextId);
+		return 0;
 	}
 
-	public void cancelRequest(ProxyRequest proxyRequest)
-			throws InterruptedException {
+	// MUST be called from processing thread
+	public void startRequest(ProxyRequest proxyRequest) {
 		if (null == proxyRequest)
 			throw new NullPointerException();
-		incoming.put(new CancelRequest(proxyRequest));
+		if (null != accepted.get(proxyRequest))
+			return;
+		short id = generateRequestId();
+		if (id == 0)
+			return; // no free slots left
+		final UpstreamRequest upstreamRequest = new UpstreamRequest(id,
+				proxyRequest);
+		inflight.put(id, upstreamRequest);
+		accepted.put(proxyRequest, upstreamRequest);
+		inflightCount.set(inflight.size());
+		outgoing.offer(upstreamRequest);
+	}
+
+	// MUST be called from processing thread
+	public void cancelRequest(ProxyRequest proxyRequest) {
+		if (null == proxyRequest)
+			throw new NullPointerException();
+		final UpstreamRequest upstreamRequest = accepted.get(proxyRequest);
+		if (null == upstreamRequest)
+			return;
+		final Short id = upstreamRequest.getId();
+		inflight.remove(id);
+		accepted.remove(proxyRequest);
+		inflightCount.set(inflight.size());
 	}
 }

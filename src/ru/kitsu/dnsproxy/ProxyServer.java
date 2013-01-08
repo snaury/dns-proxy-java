@@ -21,7 +21,6 @@ import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -47,7 +46,7 @@ public class ProxyServer {
 
 	private final Lock lock = new ReentrantLock();
 	private final Condition inflightAvailable = lock.newCondition();
-	private final BlockingQueue<Object> incoming = new LinkedBlockingQueue<>();
+	private final BlockingQueue<Runnable> incoming = new LinkedBlockingQueue<>();
 	private final BlockingQueue<ProxyResponse> outgoing = new LinkedBlockingQueue<>();
 	private final PriorityQueue<ProxyRequest> inflight = new PriorityQueue<>(
 			11, new ProxyRequest.DeadlineComparator());
@@ -63,82 +62,13 @@ public class ProxyServer {
 	private final Thread statsThread;
 	private final List<UpstreamServer> upstreams = new ArrayList<>();
 
-	private static class RequestResponse {
-		ProxyRequest request;
-		UpstreamResponse response;
-
-		RequestResponse(ProxyRequest request, UpstreamResponse response) {
-			this.request = request;
-			this.response = response;
-		}
-	}
-
-	private static class TimeoutRequest {
-		ProxyRequest request;
-
-		TimeoutRequest(ProxyRequest request) {
-			this.request = request;
-		}
-	}
-
 	private class ProcessingWorker implements Runnable {
 		@Override
 		public void run() {
 			try {
 				while (!Thread.interrupted()) {
-					final Object op = incoming.take();
-					if (op instanceof ProxyRequest) {
-						final ProxyRequest request = (ProxyRequest) op;
-						if (DEBUG) {
-							System.out.format("Request from %s: %s\n",
-									request.getAddr(), request.getMessage());
-						}
-						addRequest(request);
-						for (int i = 0; i < upstreams.size(); ++i) {
-							upstreams.get(i).startRequest(request);
-						}
-						continue;
-					}
-					if (op instanceof RequestResponse) {
-						final RequestResponse reqrep = (RequestResponse) op;
-						final ProxyRequest request = reqrep.request;
-						final UpstreamResponse response = reqrep.response;
-						if (DEBUG) {
-							System.out.format("Response from %s: %s\n",
-									response.getAddr(), response.getMessage());
-						}
-						if (request.isFinished())
-							continue; // ignore late responses
-						int index = request.addResponse(response);
-						if (index == 0) {
-							// First response is sent to the client
-							outgoing.put(new ProxyResponse(request, response));
-						}
-						if (index == upstreams.size() - 1) {
-							// Received last response, finish request
-							if (request.setFinished()) {
-								// Don't need timeout anymore
-								removeRequest(request);
-								// Send to logging
-								logged.put(request);
-							}
-						}
-						continue;
-					}
-					if (op instanceof TimeoutRequest) {
-						final ProxyRequest request = ((TimeoutRequest) op).request;
-						if (request.setFinished()) {
-							// Make sure it's cancelled
-							for (int i = 0; i < upstreams.size(); ++i) {
-								upstreams.get(i).cancelRequest(request);
-							}
-							// Send to logging
-							logged.put(request);
-						}
-						continue;
-					}
-					System.err.println("Unexpected message: " + op);
-					System.exit(1);
+					final Runnable op = incoming.take();
+					op.run();
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -184,7 +114,21 @@ public class ProxyServer {
 					buffer.get(packet);
 					final ProxyRequest request = new ProxyRequest(client,
 							packet, message);
-					incoming.put(request);
+					schedule(new Runnable() {
+						@Override
+						public void run() {
+							if (DEBUG) {
+								System.out
+										.format("Request from %s: %s\n",
+												request.getAddr(),
+												request.getMessage());
+							}
+							addRequest(request);
+							for (int i = 0; i < upstreams.size(); ++i) {
+								upstreams.get(i).startRequest(request);
+							}
+						}
+					});
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -230,7 +174,19 @@ public class ProxyServer {
 			try {
 				while (!Thread.interrupted()) {
 					final ProxyRequest request = takeNextTimedOut();
-					incoming.put(new TimeoutRequest(request));
+					schedule(new Runnable() {
+						@Override
+						public void run() {
+							if (request.setFinished()) {
+								// Make sure it's cancelled
+								for (int i = 0; i < upstreams.size(); ++i) {
+									upstreams.get(i).cancelRequest(request);
+								}
+								// Send to logging
+								logged.offer(request);
+							}
+						}
+					});
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -373,6 +329,12 @@ public class ProxyServer {
 		}
 	}
 
+	// package-private
+	// schedules op to run on processing thread
+	void schedule(Runnable op) throws InterruptedException {
+		incoming.put(op);
+	}
+
 	private static void log(String line) {
 		System.out.format("[%s] %s\n", new Date(), line);
 	}
@@ -429,8 +391,8 @@ public class ProxyServer {
 		}
 	}
 
-	private void addRequest(ProxyRequest request) throws InterruptedException {
-		lock.lockInterruptibly();
+	private void addRequest(ProxyRequest request) {
+		lock.lock();
 		try {
 			inflight.offer(request);
 			// Only signal if request becomes first in the queue
@@ -441,9 +403,8 @@ public class ProxyServer {
 		}
 	}
 
-	private boolean removeRequest(ProxyRequest request)
-			throws InterruptedException {
-		lock.lockInterruptibly();
+	private boolean removeRequest(ProxyRequest request) {
+		lock.lock();
 		try {
 			return inflight.remove(request);
 		} finally {
@@ -468,18 +429,37 @@ public class ProxyServer {
 					return inflight.poll();
 				}
 				// reduce sensitivity to ~10ms
-				inflightAvailable.await(((delay + 9999999) / 10000000) * 10,
-						TimeUnit.MILLISECONDS);
-				// inflightAvailable.awaitNanos(delay);
+				delay = ((delay + 9999999) / 10000000) * 10000000;
+				inflightAvailable.awaitNanos(delay);
 			}
 		} finally {
 			lock.unlock();
 		}
 	}
 
+	// MUST be called on processing thread
 	public void onUpstreamResponse(ProxyRequest request,
-			UpstreamResponse response) throws InterruptedException {
-		incoming.put(new RequestResponse(request, response));
+			UpstreamResponse response) {
+		if (DEBUG) {
+			System.out.format("Response from %s: %s\n", response.getAddr(),
+					response.getMessage());
+		}
+		if (request.isFinished())
+			return; // ignore late responses
+		int index = request.addResponse(response);
+		if (index == 0) {
+			// First response is sent to the client
+			outgoing.offer(new ProxyResponse(request, response));
+		}
+		if (index == upstreams.size() - 1) {
+			// Received last response, finish request
+			if (request.setFinished()) {
+				// Don't need timeout anymore
+				removeRequest(request);
+				// Send to logging
+				logged.offer(request);
+			}
+		}
 	}
 
 	private static void usage() {
