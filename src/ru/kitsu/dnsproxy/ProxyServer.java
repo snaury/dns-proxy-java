@@ -22,6 +22,7 @@ import java.util.PriorityQueue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 
 import ru.kitsu.dnsproxy.parser.DNSParseException;
 import ru.kitsu.dnsproxy.parser.DNSMessage;
@@ -62,7 +63,6 @@ public class ProxyServer {
 	private final Thread processingThread;
 	private final Thread receiveThread;
 	private final Thread sendThread;
-	private final Thread timeoutThread;
 	private final Thread logThread;
 	private final Thread statsThread;
 	private final List<UpstreamServer> upstreams = new ArrayList<>();
@@ -72,7 +72,32 @@ public class ProxyServer {
 		public void run() {
 			try {
 				while (!Thread.interrupted()) {
-					final Callable<Void> op = incoming.take();
+					final Callable<Void> op;
+					final ProxyRequest request = inflight.peek();
+					if (request != null) {
+						long delay = request.getDeadline() - System.nanoTime();
+						// Timeout as many requests as we can
+						if (delay <= 0) {
+							inflight.remove();
+							if (request.setFinished()) {
+								// Make sure it's cancelled
+								for (int i = 0; i < upstreams.size(); ++i) {
+									upstreams.get(i).cancelRequest(request);
+								}
+								// Send to logging
+								logged.put(request);
+							}
+							continue;
+						}
+						// Reduce sensitivity to ~1ms
+						delay = ((delay + 999999) / 1000000) * 1000000;
+						// Don't wait longer than delay
+						op = incoming.poll(delay, TimeUnit.NANOSECONDS);
+						if (op == null)
+							continue;
+					} else {
+						op = incoming.take();
+					}
 					op.call();
 				}
 			} catch (InterruptedException e) {
@@ -131,7 +156,7 @@ public class ProxyServer {
 												request.getAddr(),
 												request.getMessage());
 							}
-							addRequest(request);
+							inflight.add(request);
 							for (int i = 0; i < upstreams.size(); ++i) {
 								upstreams.get(i).startRequest(request);
 							}
@@ -170,33 +195,6 @@ public class ProxyServer {
 						e.printStackTrace();
 						continue;
 					}
-				}
-			} catch (InterruptedException e) {
-				// interrupted
-			}
-		}
-	}
-
-	private class TimeoutWorker implements Runnable {
-		@Override
-		public void run() {
-			try {
-				while (!Thread.interrupted()) {
-					final ProxyRequest request = takeNextTimedOut();
-					schedule(new Callable<Void>() {
-						@Override
-						public Void call() throws InterruptedException {
-							if (request.setFinished()) {
-								// Make sure it's cancelled
-								for (int i = 0; i < upstreams.size(); ++i) {
-									upstreams.get(i).cancelRequest(request);
-								}
-								// Send to logging
-								logged.put(request);
-							}
-							return null;
-						}
-					});
 				}
 			} catch (InterruptedException e) {
 				// interrupted
@@ -366,7 +364,6 @@ public class ProxyServer {
 				+ " processing");
 		receiveThread = new Thread(new ReceiveWorker(), prefix + " receive");
 		sendThread = new Thread(new SendWorker(), prefix + " send");
-		timeoutThread = new Thread(new TimeoutWorker(), prefix + " timeouts");
 		logThread = new Thread(new LogWorker(), prefix + " logging");
 		statsThread = new Thread(new StatsWorker(), prefix + " stats");
 	}
@@ -389,7 +386,6 @@ public class ProxyServer {
 		processingThread.start();
 		receiveThread.start();
 		sendThread.start();
-		timeoutThread.start();
 		logThread.start();
 		statsThread.start();
 	}
@@ -398,48 +394,10 @@ public class ProxyServer {
 		processingThread.interrupt();
 		receiveThread.interrupt();
 		sendThread.interrupt();
-		timeoutThread.interrupt();
 		logThread.interrupt();
 		statsThread.interrupt();
 		for (UpstreamServer upstream : upstreams) {
 			upstream.stop();
-		}
-	}
-
-	private void addRequest(ProxyRequest request) {
-		synchronized (inflight) {
-			inflight.offer(request);
-			// Only signal if request becomes first in the queue
-			if (inflight.peek() == request)
-				inflight.notify(); // deadline changed
-		}
-	}
-
-	private boolean removeRequest(ProxyRequest request) {
-		synchronized (inflight) {
-			return inflight.remove(request);
-		}
-	}
-
-	private ProxyRequest takeNextTimedOut() throws InterruptedException {
-		// Unlike DelayQueue there's no Leader-Follower pattern,
-		// but there's only one timeout thread, so it doesn't matter
-		synchronized (inflight) {
-			while (true) {
-				ProxyRequest request = inflight.peek();
-				if (null == request) {
-					// Empty queue, wail indefinitely
-					inflight.wait();
-					continue;
-				}
-				long delay = request.getDeadline() - System.nanoTime();
-				if (delay <= 0) {
-					return inflight.poll();
-				}
-				// reduce sensitivity to ~10ms in ms
-				delay = ((delay + 9999999) / 10000000) * 10;
-				inflight.wait(delay);
-			}
 		}
 	}
 
@@ -461,7 +419,7 @@ public class ProxyServer {
 			// Received last response, finish request
 			if (request.setFinished()) {
 				// Don't need timeout anymore
-				removeRequest(request);
+				inflight.remove(request);
 				// Send to logging
 				logged.put(request);
 			}
