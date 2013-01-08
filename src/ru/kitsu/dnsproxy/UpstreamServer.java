@@ -12,8 +12,9 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import ru.kitsu.dnsproxy.parser.DNSMessage;
@@ -29,14 +30,18 @@ public class UpstreamServer {
 	// Maximum message should be 512 bytes
 	// We accept up to 16384 bytes just in case
 	private static final int MAX_PACKET_SIZE = 16384;
+	// Maximum expected number of outgoing packets buildup
+	private static final int MAX_PACKETS = 8192;
 
 	private static final Random random = new Random();
 
 	private final AtomicInteger inflightCount = new AtomicInteger();
 	private final AtomicInteger parseErrors = new AtomicInteger();
+	private final AtomicInteger addrErrors = new AtomicInteger();
 	private final Map<Short, UpstreamRequest> inflight = new HashMap<>();
 	private final Map<ProxyRequest, UpstreamRequest> accepted = new HashMap<>();
-	private final BlockingQueue<UpstreamRequest> outgoing = new LinkedBlockingQueue<>();
+	private final BlockingQueue<UpstreamRequest> outgoing = new ArrayBlockingQueue<>(
+			MAX_PACKETS);
 
 	private final ProxyServer proxyServer;
 	private final InetSocketAddress addr;
@@ -65,11 +70,15 @@ public class UpstreamServer {
 						e.printStackTrace();
 						continue;
 					}
-					if (remote == null)
+					if (remote == null) {
+						addrErrors.incrementAndGet();
 						continue; // shouldn't happen, but just in case
+					}
 					buffer.flip();
-					if (!addr.equals(remote))
+					if (!addr.equals(remote)) {
+						addrErrors.incrementAndGet();
 						continue; // ignore packets from unexpected sources
+					}
 					final DNSMessage message;
 					try {
 						message = DNSMessage.parse(buffer, false);
@@ -89,25 +98,26 @@ public class UpstreamServer {
 					buffer.get(packet);
 					final UpstreamResponse response = new UpstreamResponse(
 							remote, packet, message);
-					proxyServer.schedule(new Runnable() {
+					proxyServer.schedule(new Callable<Void>() {
 						@Override
-						public void run() {
+						public Void call() throws InterruptedException {
 							final Short id = response.getMessage().getId();
 							final UpstreamRequest upstreamRequest = inflight
 									.get(id);
 							if (null == upstreamRequest)
-								return; // no such request in flight
+								return null; // no such request in flight
 							final ProxyRequest proxyRequest = upstreamRequest
 									.getProxyRequest();
 							if (!Arrays.equals(response.getMessage()
 									.getQuestions(), proxyRequest.getMessage()
 									.getQuestions()))
-								return; // ids match, but questions don't
+								return null; // ids match, but questions don't
 							inflight.remove(id);
 							accepted.remove(proxyRequest);
 							inflightCount.set(inflight.size());
 							proxyServer.onUpstreamResponse(proxyRequest,
 									response);
+							return null;
 						}
 					});
 				}
@@ -157,6 +167,7 @@ public class UpstreamServer {
 			throw new IOException("Cannot resolve '" + host + "'");
 		}
 		socket = DatagramChannel.open(StandardProtocolFamily.INET);
+		socket.bind(null);
 		final String prefix = "Upstream " + addr;
 		receiveThread = new Thread(new ReceiveWorker(), prefix + " receive");
 		sendThread = new Thread(new SendWorker(), prefix + " send");
@@ -172,6 +183,10 @@ public class UpstreamServer {
 
 	public int getParseErrors() {
 		return parseErrors.get();
+	}
+
+	public int getAddrErrors() {
+		return addrErrors.get();
 	}
 
 	public void start() {
@@ -202,7 +217,8 @@ public class UpstreamServer {
 	}
 
 	// MUST be called from processing thread
-	public void startRequest(ProxyRequest proxyRequest) {
+	public void startRequest(ProxyRequest proxyRequest)
+			throws InterruptedException {
 		if (null == proxyRequest)
 			throw new NullPointerException();
 		if (null != accepted.get(proxyRequest))
@@ -215,7 +231,7 @@ public class UpstreamServer {
 		inflight.put(id, upstreamRequest);
 		accepted.put(proxyRequest, upstreamRequest);
 		inflightCount.set(inflight.size());
-		outgoing.offer(upstreamRequest);
+		outgoing.put(upstreamRequest);
 	}
 
 	// MUST be called from processing thread

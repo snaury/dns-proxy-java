@@ -19,11 +19,9 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.Callable;
 
 import ru.kitsu.dnsproxy.parser.DNSParseException;
 import ru.kitsu.dnsproxy.parser.DNSMessage;
@@ -40,17 +38,24 @@ public class ProxyServer {
 	// Maximum message should be 512 bytes
 	// We accept up to 16384 bytes just in case
 	private static final int MAX_PACKET_SIZE = 16384;
+	// Maximum expected number of outgoing packets buildup
+	private static final int MAX_PACKETS = 8192;
+	// Maximum expected number of processing ops buildup
+	private static final int MAX_PROCESSING = 16384;
+	// Maximum expected number of logged requests buildup
+	private static final int MAX_LOGGED = 8192;
 	// Date format in a log filename
 	private static final SimpleDateFormat logNameDateFormat = new SimpleDateFormat(
 			"yyyy-MM-dd-HH-mm");
 
-	private final Lock lock = new ReentrantLock();
-	private final Condition inflightAvailable = lock.newCondition();
-	private final BlockingQueue<Runnable> incoming = new LinkedBlockingQueue<>();
-	private final BlockingQueue<ProxyResponse> outgoing = new LinkedBlockingQueue<>();
+	private final BlockingQueue<Callable<Void>> incoming = new ArrayBlockingQueue<>(
+			MAX_PROCESSING);
+	private final BlockingQueue<ProxyResponse> outgoing = new ArrayBlockingQueue<>(
+			MAX_PACKETS);
 	private final PriorityQueue<ProxyRequest> inflight = new PriorityQueue<>(
 			11, new ProxyRequest.DeadlineComparator());
-	private final BlockingQueue<ProxyRequest> logged = new LinkedBlockingQueue<>();
+	private final BlockingQueue<ProxyRequest> logged = new ArrayBlockingQueue<>(
+			MAX_LOGGED);
 
 	private final InetSocketAddress addr;
 	private final DatagramChannel socket;
@@ -67,11 +72,14 @@ public class ProxyServer {
 		public void run() {
 			try {
 				while (!Thread.interrupted()) {
-					final Runnable op = incoming.take();
-					op.run();
+					final Callable<Void> op = incoming.take();
+					op.call();
 				}
 			} catch (InterruptedException e) {
 				// interrupted
+			} catch (Exception e) {
+				e.printStackTrace();
+				System.exit(1);
 			}
 		}
 	}
@@ -114,9 +122,9 @@ public class ProxyServer {
 					buffer.get(packet);
 					final ProxyRequest request = new ProxyRequest(client,
 							packet, message);
-					schedule(new Runnable() {
+					schedule(new Callable<Void>() {
 						@Override
-						public void run() {
+						public Void call() throws InterruptedException {
 							if (DEBUG) {
 								System.out
 										.format("Request from %s: %s\n",
@@ -127,6 +135,7 @@ public class ProxyServer {
 							for (int i = 0; i < upstreams.size(); ++i) {
 								upstreams.get(i).startRequest(request);
 							}
+							return null;
 						}
 					});
 				}
@@ -174,17 +183,18 @@ public class ProxyServer {
 			try {
 				while (!Thread.interrupted()) {
 					final ProxyRequest request = takeNextTimedOut();
-					schedule(new Runnable() {
+					schedule(new Callable<Void>() {
 						@Override
-						public void run() {
+						public Void call() throws InterruptedException {
 							if (request.setFinished()) {
 								// Make sure it's cancelled
 								for (int i = 0; i < upstreams.size(); ++i) {
 									upstreams.get(i).cancelRequest(request);
 								}
 								// Send to logging
-								logged.offer(request);
+								logged.put(request);
 							}
+							return null;
 						}
 					});
 				}
@@ -313,7 +323,12 @@ public class ProxyServer {
 						if ((n = upstream.getParseErrors()) != 0) {
 							sb.append("/");
 							sb.append(n);
-							sb.append("err");
+							sb.append("perr");
+						}
+						if ((n = upstream.getAddrErrors()) != 0) {
+							sb.append("/");
+							sb.append(n);
+							sb.append("aerr");
 						}
 						++index;
 					}
@@ -331,7 +346,7 @@ public class ProxyServer {
 
 	// package-private
 	// schedules op to run on processing thread
-	void schedule(Runnable op) throws InterruptedException {
+	void schedule(Callable<Void> op) throws InterruptedException {
 		incoming.put(op);
 	}
 
@@ -392,54 +407,45 @@ public class ProxyServer {
 	}
 
 	private void addRequest(ProxyRequest request) {
-		lock.lock();
-		try {
+		synchronized (inflight) {
 			inflight.offer(request);
 			// Only signal if request becomes first in the queue
 			if (inflight.peek() == request)
-				inflightAvailable.signal(); // deadline changed
-		} finally {
-			lock.unlock();
+				inflight.notify(); // deadline changed
 		}
 	}
 
 	private boolean removeRequest(ProxyRequest request) {
-		lock.lock();
-		try {
+		synchronized (inflight) {
 			return inflight.remove(request);
-		} finally {
-			lock.unlock();
 		}
 	}
 
 	private ProxyRequest takeNextTimedOut() throws InterruptedException {
 		// Unlike DelayQueue there's no Leader-Follower pattern,
 		// but there's only one timeout thread, so it doesn't matter
-		lock.lockInterruptibly();
-		try {
+		synchronized (inflight) {
 			while (true) {
 				ProxyRequest request = inflight.peek();
 				if (null == request) {
 					// Empty queue, wail indefinitely
-					inflightAvailable.await();
+					inflight.wait();
 					continue;
 				}
 				long delay = request.getDeadline() - System.nanoTime();
 				if (delay <= 0) {
 					return inflight.poll();
 				}
-				// reduce sensitivity to ~10ms
-				delay = ((delay + 9999999) / 10000000) * 10000000;
-				inflightAvailable.awaitNanos(delay);
+				// reduce sensitivity to ~10ms in ms
+				delay = ((delay + 9999999) / 10000000) * 10;
+				inflight.wait(delay);
 			}
-		} finally {
-			lock.unlock();
 		}
 	}
 
 	// MUST be called on processing thread
 	public void onUpstreamResponse(ProxyRequest request,
-			UpstreamResponse response) {
+			UpstreamResponse response) throws InterruptedException {
 		if (DEBUG) {
 			System.out.format("Response from %s: %s\n", response.getAddr(),
 					response.getMessage());
@@ -449,7 +455,7 @@ public class ProxyServer {
 		int index = request.addResponse(response);
 		if (index == 0) {
 			// First response is sent to the client
-			outgoing.offer(new ProxyResponse(request, response));
+			outgoing.put(new ProxyResponse(request, response));
 		}
 		if (index == upstreams.size() - 1) {
 			// Received last response, finish request
@@ -457,7 +463,7 @@ public class ProxyServer {
 				// Don't need timeout anymore
 				removeRequest(request);
 				// Send to logging
-				logged.offer(request);
+				logged.put(request);
 			}
 		}
 	}
